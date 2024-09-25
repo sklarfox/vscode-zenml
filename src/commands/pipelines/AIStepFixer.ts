@@ -11,7 +11,29 @@ import * as path from 'path';
 import WebviewBase from '../../common/WebviewBase';
 import MultiStepInput from './MultiStepInput';
 import StepFixerFs, { SaveAIChangeEmitter } from './StepFixerFs';
-import { SupportedLLMModels, SupportedLLMProviders } from '../../services/aiService';
+import {
+  SupportedLLMModels,
+  SupportedLLMProviders,
+  FixMyPipelineResponse,
+} from '../../services/aiService';
+
+class StreamedContentProvider implements vscode.TextDocumentContentProvider {
+  private content = '';
+  private onDidChangeEmitter = new vscode.EventEmitter<vscode.Uri>();
+
+  public updateContent(newContent: string) {
+    this.content += newContent; // Append streamed data
+    this.onDidChangeEmitter.fire(vscode.Uri.parse('stream://data')); // Trigger update
+  }
+
+  provideTextDocumentContent(uri: vscode.Uri): string {
+    return this.content;
+  }
+
+  get onDidChange() {
+    return this.onDidChangeEmitter.event;
+  }
+}
 
 export default class AIStepFixer extends WebviewBase {
   private static instance: AIStepFixer;
@@ -64,49 +86,42 @@ export default class AIStepFixer extends WebviewBase {
     const existingPanel = p.getPanel(node.id);
     const ai = AIService.getInstance(WebviewBase.context);
 
-    const response = await ai.fixMyPipelineRequest(log, String(stepData.sourceCode));
+    const stream = await ai.fixMyPipelineRequest(log, String(stepData.sourceCode));
 
-    if (!response) {
+    if (!stream) {
       return;
     }
-    const { message, code } = response;
 
-    const codeChoices = code
-      .map(c => {
-        return c.content;
-      })
-      .filter(content => content);
+    // let sourceCodeFileMatches = await searchWorkspaceByFileContent(
+    //   String(stepData.sourceCode).trim()
+    // );
 
-    let sourceCodeFileMatches = await searchWorkspaceByFileContent(
-      String(stepData.sourceCode).trim()
-    );
+    // if (sourceCodeFileMatches.length === 0) {
+    //   sourceCodeFileMatches = await searchGitCacheByFileContent(String(stepData.sourceCode).trim());
+    //   vscode.window.showInformationMessage(
+    //     `We could not find a local file with this step in your current workspace, but found one cached in the nearest git log.`
+    //   );
+    // }
 
-    if (sourceCodeFileMatches.length === 0) {
-      sourceCodeFileMatches = await searchGitCacheByFileContent(String(stepData.sourceCode).trim());
-      vscode.window.showInformationMessage(
-        `We could not find a local file with this step in your current workspace, but found one cached in the nearest git log.`
-      );
-    }
+    // if (sourceCodeFileMatches.length === 0) {
+    //   vscode.window.showWarningMessage(
+    //     `We could not find a file with this step in your local environment, so cannot display inline recommendations. If the file is local, make sure it is available within your VSCode workspace and try again.`
+    //   );
+    // } else if (sourceCodeFileMatches.length > 1) {
+    //   vscode.window.showWarningMessage(
+    //     `We found multiple files with this step in your local environment, so cannot determine in which file to display inline recommendations. If you would like inline recommendations, you can adjust your VSCode environment so that it contains only one file with the registered step and try again.`
+    //   );
+    // } else if (sourceCodeFileMatches.length === 1) {
+    //   this.createCodeRecommendation(
+    //     sourceCodeFileMatches[0].uri,
+    //     codeChoices,
+    //     String(stepData.sourceCode).trim(),
+    //     existingPanel,
+    //     sourceCodeFileMatches[0].content
+    //   );
+    // }
 
-    if (sourceCodeFileMatches.length === 0) {
-      vscode.window.showWarningMessage(
-        `We could not find a file with this step in your local environment, so cannot display inline recommendations. If the file is local, make sure it is available within your VSCode workspace and try again.`
-      );
-    } else if (sourceCodeFileMatches.length > 1) {
-      vscode.window.showWarningMessage(
-        `We found multiple files with this step in your local environment, so cannot determine in which file to display inline recommendations. If you would like inline recommendations, you can adjust your VSCode environment so that it contains only one file with the registered step and try again.`
-      );
-    } else if (sourceCodeFileMatches.length === 1) {
-      this.createCodeRecommendation(
-        sourceCodeFileMatches[0].uri,
-        codeChoices,
-        String(stepData.sourceCode).trim(),
-        existingPanel,
-        sourceCodeFileMatches[0].content
-      );
-    }
-
-    this.createVirtualDocument(id, message || 'Something went wrong', existingPanel);
+    this.createVirtualDocument(id, stream, existingPanel);
 
     if (existingPanel) {
       existingPanel.webview.postMessage('AI Query Complete');
@@ -127,22 +142,22 @@ export default class AIStepFixer extends WebviewBase {
 
   private async createVirtualDocument(
     id: string,
-    content: string,
+    stream: FixMyPipelineResponse,
     existingPanel?: vscode.WebviewPanel
   ) {
-    const provider = new (class implements vscode.TextDocumentContentProvider {
-      provideTextDocumentContent(uri: vscode.Uri): string {
-        return content;
-      }
-    })();
+    const contentProvider = new StreamedContentProvider();
+    const providerUri = vscode.Uri.parse('stream://data');
 
-    vscode.workspace.registerTextDocumentContentProvider('fix-my-pipeline', provider);
-    const uri = vscode.Uri.parse(`fix-my-pipeline:${id}.md`);
+    vscode.workspace.registerTextDocumentContentProvider('stream', contentProvider);
 
-    if (existingPanel) {
-      existingPanel.reveal(existingPanel.viewColumn, false);
+    // Open the virtual document
+    vscode.workspace.openTextDocument(providerUri).then(doc => {
+      vscode.window.showTextDocument(doc);
+    });
+
+    for await (const part of stream) {
+      contentProvider.updateContent(part.choices[0]?.delta?.content || '');
     }
-    vscode.commands.executeCommand('markdown.showPreviewToSide', uri);
   }
 
   private createCodeRecommendation(

@@ -15,7 +15,7 @@ import type { ExtensionContext } from 'vscode';
 import * as vscode from 'vscode';
 // typescript incorrectly identifies the .js as a file extension, not the name of the module
 // @ts-expect-error
-import { TokenJS } from 'token.js';
+import { TokenJS, CompletionResponseChunk } from 'token.js';
 
 const supportedLLMProviders = ['anthropic', 'gemini', 'openai'] as const;
 export type SupportedLLMProviders = (typeof supportedLLMProviders)[number];
@@ -34,10 +34,7 @@ type OpenAIModels = (typeof supportedOpenAIModels)[number];
 
 export type SupportedLLMModels = AnthropicModels | GeminiModels | OpenAIModels;
 
-export interface FixMyPipelineResponse {
-  message: string;
-  code: { language: string; content: string }[];
-}
+export type FixMyPipelineResponse = AsyncIterable<CompletionResponseChunk>;
 
 export class AIService {
   private static instance: AIService;
@@ -112,7 +109,8 @@ export class AIService {
 
     await this.setAPIKey();
     const tokenjs = new TokenJS();
-    const completion = await tokenjs.chat.completions.create({
+    const stream = await tokenjs.chat.completions.create({
+      stream: true,
       provider: this.provider,
       model: this.model,
       messages: [
@@ -136,19 +134,15 @@ export class AIService {
       ],
     });
 
-    const response = completion.choices[0].message.content;
-    if (response === null) {
-      return undefined;
-    }
+    // const response = completion.choices[0].message.content;
+    // if (response === null) {
+    //   return undefined;
+    // }
 
-    const pythonSnippets = this.extractPythonSnippets(response).map(snippet => {
-      return { language: 'python', content: snippet };
-    });
-
-    return {
-      message: response,
-      code: pythonSnippets,
-    };
+    // const pythonSnippets = this.extractPythonSnippets(response).map(snippet => {
+    //   return { language: 'python', content: snippet };
+    // });
+    return stream;
   }
 
   public getSupportedModels(provider: SupportedLLMProviders): string[] {
